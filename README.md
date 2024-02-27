@@ -1,0 +1,2 @@
+# Conjugate_gradient_solver_challenge_2024
+EUMaster4HPC Student Challenge 2024
