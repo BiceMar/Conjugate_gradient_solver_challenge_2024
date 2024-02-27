@@ -1,5 +1,6 @@
 # Conjugate_gradient_solver_challenge_2024
 EUMaster4HPC Student Challenge 2024.
+Parallel implementation of the conjugate gradient method using a MPI and OpenMP.
 
 Follow these steps to allocate resources, load the required modules, and submit the job on the system.
 
