@@ -8,6 +8,65 @@
 #include <chrono>
 #include <iostream>
 
+#include <mpi.h>
+#include <cstdio>
+#include <cstdlib>
+
+bool parallel_read_matrix_from_file(const char * filename, double ** matrix_out, size_t * num_rows_out, size_t * num_cols_out, size_t * total_rows_out)
+{   
+    int rank, mpi_size;
+    MPI_Comm_rank(MPI_COMM_WORLD, &rank); 
+    MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
+
+    FILE * file = fopen(filename, "rb");
+    if(file == nullptr) return false;
+
+    // Each process reads the total number of rows and columns
+    size_t total_rows, num_cols;
+    fread(&total_rows, sizeof(size_t), 1, file);
+    fread(&num_cols, sizeof(size_t), 1, file);
+
+    // Calculation of the number of rows per process
+    size_t rows_per_process = total_rows / mpi_size;
+    size_t extra_rows = total_rows % mpi_size;
+    size_t num_rows = rows_per_process + (rank < extra_rows ? 1 : 0);
+
+    // Allocation of the local matrix
+    double *local_matrix = new double[num_rows * num_cols];
+
+    // Calculation of the offset and reading of the matrix portion
+    size_t offset = (rank * rows_per_process + (rank < extra_rows ? rank : extra_rows)) * num_cols * sizeof(double);
+    fseek(file, offset + 2 * sizeof(size_t), SEEK_SET); // Adjust the offset to include the header
+    fread(local_matrix, sizeof(double), num_rows * num_cols, file);
+    fclose(file);
+
+    // Allocation of the full matrix in each process
+    double *full_matrix = new double[total_rows * num_cols];
+
+    // Preparation for MPI_Allgatherv
+    int *recvcounts = new int[mpi_size];
+    int *displs = new int[mpi_size];
+    for(int i = 0; i < mpi_size; i++) {
+        recvcounts[i] = (rows_per_process + (i < extra_rows ? 1 : 0)) * num_cols;
+        displs[i] = (i > 0) ? (displs[i-1] + recvcounts[i-1]) : 0;
+    }
+
+    // Gathers all local portions into the full matrix in each process
+    MPI_Allgatherv(local_matrix, num_rows * num_cols, MPI_DOUBLE, full_matrix, recvcounts, displs, MPI_DOUBLE, MPI_COMM_WORLD);
+
+    // Cleanup and setting output pointers
+    delete[] local_matrix;
+    delete[] recvcounts;
+    delete[] displs;
+
+    *matrix_out = full_matrix;
+    *num_rows_out = total_rows; // each processes has all the rows.
+    *num_cols_out = num_cols;
+    *total_rows_out = total_rows;
+
+    return true;
+}
+
 bool read_matrix_from_file(const char *filename, double **matrix_out, size_t *num_rows_out, size_t *num_cols_out) {
     double *matrix;
     size_t num_rows;
@@ -198,7 +257,9 @@ int main(int argc, char **argv) {
     const char *output_file_sol = "io/sol.bin";
     int max_iters = 1000;
     double rel_error = 1e-9;
-    std::chrono::high_resolution_clock::time_point start, finish;
+    std::chrono::high_resolution_clock::time_point t1, t2;
+    std::chrono::milliseconds duration;
+    double cpu_time;
 
     if (argc > 1) input_file_matrix = argv[1];
     if (argc > 2) input_file_rhs = argv[2];
@@ -213,80 +274,37 @@ int main(int argc, char **argv) {
     size_t matrix_cols;
     size_t rhs_rows;
     size_t rhs_cols;
+    size_t total_rows_matrix, total_rows_rhs;
 
-    if (rank == 0) {
+    // read matrix
+    t1 = std::chrono::high_resolution_clock::now();
+    bool success_read_matrix = parallel_read_matrix_from_file(input_file_matrix, &matrix, &matrix_rows, &matrix_cols, &total_rows_matrix); 
+    //bool success_read_matrix = read_matrix_from_file(input_file_matrix, &matrix, &matrix_rows, &matrix_cols); 
+    MPI_Barrier(MPI_COMM_WORLD);    
+    t2 = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1);
+    if(rank == 0)
+        std::cout << "Time taken: " << duration.count() << " milliseconds" << std::endl;
 
-        printf("Usage: ./random_matrix input_file_matrix.bin input_file_rhs.bin output_file_sol.bin max_iters rel_error\n");
-        printf("All parameters are optional and have default values\n");
-        printf("\n");
+    // read rhs
+    t1 = std::chrono::high_resolution_clock::now();
+    bool success_read_rhs = parallel_read_matrix_from_file(input_file_rhs, &rhs, &rhs_rows, &rhs_cols, &total_rows_rhs);
+    // bool success_read_rhs = read_matrix_from_file(input_file_rhs, &rhs, &rhs_rows, &rhs_cols);
+    MPI_Barrier(MPI_COMM_WORLD);    
+    t2 = std::chrono::high_resolution_clock::now();
+    duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1);
+    if(rank == 0)
+        std::cout << "Time taken: " << duration.count() << " milliseconds" << std::endl;
 
-        printf("Command line arguments:\n");
-        printf("  input_file_matrix: %s\n", input_file_matrix);
-        printf("  input_file_rhs:    %s\n", input_file_rhs);
-        printf("  output_file_sol:   %s\n", output_file_sol);
-        printf("  max_iters:         %d\n", max_iters);
-        printf("  rel_error:         %e\n", rel_error);
-        printf("\n");
-
-        printf("Reading matrix from file ...\n");
-        bool success_read_matrix = read_matrix_from_file(input_file_matrix, &matrix, &matrix_rows, &matrix_cols);
-        if (!success_read_matrix) {
-            fprintf(stderr, "Failed to read matrix\n");
-            return 1;
-        }
-        printf("Done\n");
-        printf("\n");
-
-        printf("Reading right hand side from file ...\n");
-        bool success_read_rhs = read_matrix_from_file(input_file_rhs, &rhs, &rhs_rows, &rhs_cols);
-        if (!success_read_rhs) {
-            fprintf(stderr, "Failed to read right hand side\n");
-            return 2;
-        }
-        printf("Done\n");
-        printf("\n");
-
-        if (matrix_rows != matrix_cols) {
-            fprintf(stderr, "Matrix has to be square\n");
-            return 3;
-        }
-        if (rhs_rows != matrix_rows) {
-            fprintf(stderr, "Size of right hand side does not match the matrix\n");
-            return 4;
-        }
-        if (rhs_cols != 1) {
-            fprintf(stderr, "Right hand side has to have just a single column\n");
-            return 5;
-        }
-
-        size = matrix_rows;
-    }
-
-    // Broadcast of matrix rows, cols and size
-    MPI_Bcast(&matrix_rows, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&matrix_cols, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
-    MPI_Bcast(&size, 1, MPI_UNSIGNED_LONG, 0, MPI_COMM_WORLD);
-
-    if (rank != 0) {
-        // Allocates spaces for non-zero precesses
-        matrix = new double[size * size];
-        rhs = new double[size];
-        start = std::chrono::high_resolution_clock::now();
-    }
-
-    MPI_Bcast(matrix, matrix_rows * matrix_cols, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-    MPI_Bcast(rhs, matrix_rows, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
+    size = matrix_rows;
     double *sol = new double[size];
-
     conjugate_gradients(matrix, rhs, sol, size, max_iters, rel_error);
 
     if (rank == 0) {
 
-        finish = std::chrono::high_resolution_clock::now();
-        std::chrono::duration<double> time = std::chrono::duration_cast<std::chrono::duration<double>>(finish-start);
-        double cpu_time = time.count();
-        std::cout << "Total CPU time = " << cpu_time << std::endl;
+        t2 = std::chrono::high_resolution_clock::now();
+        duration = std::chrono::duration_cast<std::chrono::milliseconds>(t2 - t1);
+        std::cout << "Time taken: " << duration.count() << " milliseconds" << std::endl;
 
         printf("\n\nWriting solution to file ...\n");
         bool success_write_sol = write_matrix_to_file(output_file_sol, sol, size, 1);
