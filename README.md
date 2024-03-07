@@ -1,8 +1,9 @@
 # Conjugate_gradient_solver_challenge_2024
-EUMaster4HPC Student Challenge 2024.
-Parallel implementation of the conjugate gradient method using a MPI and OpenMP.
+EUMaster4HPC Student Challenge 2024: parallel implementation of the conjugate gradient method using a MPI and OpenMP.
 
-Follow these steps to allocate resources, load the required modules, and submit the job on the system.
+The main program in this project is `conjugate_gradients.cpp`, which solves the system. It loads and input dense matrix in row-major format and a right-hand-side from given binary files, performs the conjugate gradient iterations until convergence, and then writes the found solution to a given output binary file. A symmetric positive definite matrix and a right-hand-side can be generated using the `random_spd_system.sh` script and program.
+
+Follow these steps to allocate resources, load the required modules, and submit the job on the system (MeluXina supercomputer).
 
 ### 1. Allocate Resources
 
@@ -32,7 +33,7 @@ Create a shell script (mpi_job.sh) for your SLURM job. Use the following templat
 #SBATCH --cpus-per-task=16                 # Number of cores per task
 #SBATCH --time=00:15:00                    # Time limit (HH:MM:SS)
 #SBATCH --partition=cpu                    # Partition name
-#SBATCH --account=p200301                  # Project account
+#SBATCH --account=                         # Project account
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
 
@@ -43,4 +44,10 @@ srun --mpi=pspmix --cpus-per-task=$SLURM_CPUS_PER_TASK ./conjugate_gradients
 
 ```sh
 sbatch mpi_job.sh
+```
+To generate a random SPD system of 10000 equations and unknowns:
+
+```sh
+./random_spd_system.sh 10000 io/matrix.bin io/rhs.bin
+
 ```
