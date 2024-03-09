@@ -54,42 +54,56 @@ void print_matrix(const double * matrix, size_t num_rows, size_t num_cols, FILE 
 }
 
 double dotP(const double * x, const double * y, size_t size) {
-
+    // Initialize the result and the variable to hold the sub-products
     double result = 0.0;
     double sub_prod = 0.0;
-    #pragma omp parallel for shared(x, y) schedule(static) reduction(+:sub_prod) 
+
+    // Parallelize the computation of the dot product
+    #pragma omp parallel for shared(x, y) reduction(+:sub_prod) 
     for(size_t i = 0; i < size; i++) {
+        // Accumulate the product of corresponding elements
         sub_prod += x[i] * y[i];
     }
     
+    // Use MPI to reduce (sum up) all the partial dot products into 'result'
     MPI_Allreduce(&sub_prod, &result, 1, MPI_DOUBLE, MPI_SUM, MPI_COMM_WORLD);
 
     return result;
 }
 
+
 void axpbyP(double alpha, const double * x, double beta, double * y, size_t size)
 {
-    #pragma omp parallel for shared(x, y) schedule(static) 
+    #pragma omp parallel for shared(x, y) 
     for(size_t i = 0; i < size; i++)
     {
+        // Perform the operation y = alpha * x + beta * y for each element
         y[i] = alpha * x[i] + beta * y[i];
     }
 }
 
+
 void gemvP(double alpha, const double * A, const double * x, double beta, double * y, size_t num_rows, size_t num_cols)
 {
-    #pragma omp parallel for schedule(static)
+    // Parallelize over the rows of the matrix
+    #pragma omp parallel for private(y_val)
     for(size_t r = 0; r < num_rows; r++)
     {
+        // Initialize the accumulator for this row
         double y_val = 0.0;
-        #pragma omp simd reduction(+:y_val)
-            for(size_t c = 0; c < num_cols; c++)
-            {
-                y_val += alpha * A[r * num_cols + c] * x[c];
-            }
+
+        //#pragma omp simd reduction(+:y_val)
+        for(size_t c = 0; c < num_cols; c++)
+        {
+            // Compute the dot product of the row of A and vector x, scaled by alpha
+            y_val += alpha * A[r * num_cols + c] * x[c];
+        }
+
+        // Update y by adding the scaled result to the scaled original y values
         y[r] = beta * y[r] + y_val;
     }
 }
+
 
 // `A` is the matrix, `b` is the right-hand side vector, `x` is the solution vector.
 // `local_size` is the number of rows of `A` handled by this process, `total_rows` is the total number of rows in `A`.
@@ -98,18 +112,16 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     int rank, mpi_size; // MPI process rank and total number of processes
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size);
-
     MPI_File file;
     MPI_Status status;
 
-    
     size_t num_iters; // Counter for the number of iterations
-    double alpha, beta, rr, rr_new; double bb; // Scalars for algorithm steps
+    double alpha, beta, rr, rr_new, bb; // Scalars for algorithm steps
     double *tmp1 = new double; // Temporary storage for dot product results
     double *tmp2 = new double; // Temporary storage for reduced dot product results
-    double * p_tmp = new double[local_size]; // Local search direction vector
     double * p = new double[total_rows]; // Global search direction vector
-    double * Ap_tmp = new double[local_size]; // Local matrix-vector product result
+    double * p_local = new double[local_size]; // Local search direction vector
+    double * Ap_local = new double[local_size]; // Local matrix-vector product result
     double * Ap = new double[total_rows]; // Global matrix-vector product result
     double * r = new double[local_size]; // Local residual vector
 
@@ -119,7 +131,7 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     {
         x[i] = 0.0;
         r[i] = b[i];
-        p_tmp[i] = b[i];
+        p_local[i] = b[i];
     }
 
     // Compute the distribution of rows across processes
@@ -148,37 +160,26 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
         offset += rows_per_processes[i];
     }
 
-
     // Compute b*b and reduce it across all processes
     bb = dotP(b, b, local_size);
     rr = bb; 
 
     // Gather initial search directions from all processes
-    MPI_Allgatherv(p_tmp, local_size, MPI_DOUBLE, p, rows_per_processes, row_offsets, MPI_DOUBLE, MPI_COMM_WORLD);
+    MPI_Allgatherv(p_local, local_size, MPI_DOUBLE, p, rows_per_processes, row_offsets, MPI_DOUBLE, MPI_COMM_WORLD);
 
     // Main iteration loop
     for(num_iters = 1; num_iters <= max_iters; num_iters++)
     {
-        // Compute Ap = A*p and gather the result from all processes
-        gemvP(1.0, A, p, 0.0, Ap_tmp, local_size, total_rows);
+        gemvP(1.0, A, p, 0.0, Ap_local, local_size, total_rows);
 
         // Compute the dot product of p and Ap and reduce the result
-        *tmp2 = dotP(p_tmp, Ap_tmp, local_size);
+        *tmp2 = dotP(p_local, Ap_local, local_size);
 
         // Update alpha, x, and r using the results
         alpha = rr / *tmp2;
 
-        #pragma omp parallel sections
-        {
-            #pragma omp section
-                axpbyP(alpha, p_tmp, 1.0, x, local_size);
-            #pragma omp section
-                axpbyP(-alpha, Ap_tmp, 1.0, r, local_size);
-        }
-
-
-        //axpbyP(alpha, p_tmp, 1.0, x, local_size);
-        //axpbyP(-alpha, Ap_tmp, 1.0, r, local_size);
+        axpbyP(alpha, p_local, 1.0, x, local_size);
+        axpbyP(-alpha, Ap_local, 1.0, r, local_size);
 
         // Compute the new residual norm and reduce the result
         *tmp2 = dotP(r, r, local_size);
@@ -192,8 +193,8 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
             break; // Exit loop if converged
 
         // Update the search direction and gather the result from all processes
-        axpbyP(1.0, r, beta, p_tmp, local_size);
-        MPI_Allgatherv(p_tmp, local_size, MPI_DOUBLE, p, rows_per_processes, row_offsets, MPI_DOUBLE, MPI_COMM_WORLD);
+        axpbyP(1.0, r, beta, p_local, local_size);
+        MPI_Allgatherv(p_local, local_size, MPI_DOUBLE, p, rows_per_processes, row_offsets, MPI_DOUBLE, MPI_COMM_WORLD);
     }
 
     if(rank == 0)
@@ -221,21 +222,19 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     delete[] Ap; 
     delete[] tmp1; 
     delete[] tmp2;
-    delete[] Ap_tmp; 
-    delete[] p_tmp; 
+    delete[] Ap_local; 
+    delete[] p_local; 
 }
 
 int main(int argc, char ** argv)
 {   
     // MPI 
-
     int rank, mpi_size;
     MPI_Init(nullptr, nullptr);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank); 
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size); 
 
     // Variables for the conjugate gradient method
-
     size_t max_iters = 1000;
     double rel_error = 1e-9;
 
@@ -301,7 +300,6 @@ int main(int argc, char ** argv)
         return 5;
     }
     
-
     // Solve the sistem
     double * sol = new double[matrix_cols];
     double start_time = MPI_Wtime();
