@@ -3,6 +3,7 @@
 #include <iostream>
 #include <cmath>
 #include <mpi.h>
+#include <omp.h>
 
 bool read_matrix_from_file(const char * filename, double ** matrix_out, size_t * num_rows_out, size_t * num_cols_out)
 {   
@@ -19,14 +20,19 @@ bool read_matrix_from_file(const char * filename, double ** matrix_out, size_t *
     fseek(file, (rank * (total_rows / mpi_size) * num_cols_local) * sizeof(double), SEEK_CUR);
 
     // Calculate the number of rows this process handles
-    if(total_rows % mpi_size != 0){
-        (rank != mpi_size - 1) ? num_rows_local = (total_rows / mpi_size) : num_rows_local = (total_rows / mpi_size) + (total_rows % mpi_size);
-    }
-    else{
-        num_rows_local = total_rows / mpi_size;
-    }
+    num_rows_local = total_rows / mpi_size;
+    if(rank == mpi_size - 1) { num_rows_local += total_rows % mpi_size; }
     
     matrix = new double[num_rows_local * num_cols_local];
+    
+    #pragma omp parallel for schedule(static)
+    for(size_t r = 0; r < num_rows_local; r++)
+    {
+        for(size_t c = 0; c < num_cols_local; c++)
+        {
+            matrix[r * num_cols_local + c] = 0.0;
+        }
+    }
     
     // Read the appropriate number of doubles from the file based on the process rank
     fread(matrix, sizeof(double), num_rows_local * num_cols_local, file);
@@ -42,6 +48,7 @@ bool read_matrix_from_file(const char * filename, double ** matrix_out, size_t *
 
 void print_matrix(const double * matrix, size_t num_rows, size_t num_cols, FILE * file = stdout)
 {
+    fprintf(file, "%zu %zu\n", num_rows, num_cols);
     for(size_t r = 0; r < num_rows; r++)
     {
         for(size_t c = 0; c < num_cols; c++)
@@ -59,7 +66,7 @@ double dotP(const double * x, const double * y, size_t size) {
     double sub_prod = 0.0;
 
     // Parallelize the computation of the dot product
-    #pragma omp parallel for shared(x, y) reduction(+:sub_prod) 
+    #pragma omp parallel for shared(x, y) schedule(static) reduction(+:sub_prod) 
     for(size_t i = 0; i < size; i++) {
         // Accumulate the product of corresponding elements
         sub_prod += x[i] * y[i];
@@ -74,7 +81,7 @@ double dotP(const double * x, const double * y, size_t size) {
 
 void axpbyP(double alpha, const double * x, double beta, double * y, size_t size)
 {
-    #pragma omp parallel for shared(x, y) 
+    #pragma omp parallel for shared(x, y) schedule(static) 
     for(size_t i = 0; i < size; i++)
     {
         // Perform the operation y = alpha * x + beta * y for each element
@@ -82,17 +89,15 @@ void axpbyP(double alpha, const double * x, double beta, double * y, size_t size
     }
 }
 
-
 void gemvP(double alpha, const double * A, const double * x, double beta, double * y, size_t num_rows, size_t num_cols)
 {
     // Parallelize over the rows of the matrix
-    #pragma omp parallel for private(y_val)
+    #pragma omp parallel for schedule(static)
     for(size_t r = 0; r < num_rows; r++)
     {
         // Initialize the accumulator for this row
         double y_val = 0.0;
-
-        //#pragma omp simd reduction(+:y_val)
+        #pragma omp simd reduction(+:y_val)
         for(size_t c = 0; c < num_cols; c++)
         {
             // Compute the dot product of the row of A and vector x, scaled by alpha
@@ -103,7 +108,6 @@ void gemvP(double alpha, const double * A, const double * x, double beta, double
         y[r] = beta * y[r] + y_val;
     }
 }
-
 
 // `A` is the matrix, `b` is the right-hand side vector, `x` is the solution vector.
 // `local_size` is the number of rows of `A` handled by this process, `total_rows` is the total number of rows in `A`.
@@ -126,12 +130,13 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     double * r = new double[local_size]; // Local residual vector
 
     // Initialize x to zero and r and p_tmp to b locally for each process
-    #pragma omp parallel for
+    #pragma omp parallel for schedule(static)
     for(size_t i = 0; i < local_size; i++)
     {
         x[i] = 0.0;
         r[i] = b[i];
-        p_local[i] = b[i];
+        p[i] = p_local[i] = b[i];
+        Ap_local[i] = 0.0;
     }
 
     // Compute the distribution of rows across processes
@@ -139,25 +144,18 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     int * row_offsets = new int[mpi_size]; // Starting offset of rows for each process
 
     // Adjust the distribution if total_rows is not divisible evenly by mpi_size
-    if(total_rows % mpi_size != 0){
-        #pragma omp parallel for
-        for(int i = 0; i < mpi_size; i++)
-            (i != mpi_size - 1) ? rows_per_processes[i] = (total_rows / mpi_size) : rows_per_processes[i] = (total_rows / mpi_size) + (total_rows % mpi_size);
+    #pragma omp parallel for schedule(static)
+    for(int i = 0; i < mpi_size; i++)
+    {
+        rows_per_processes[i] = total_rows / mpi_size;
     }
-    else{
-        #pragma omp parallel for
-        for(int i = 0; i < mpi_size; i++)
-            rows_per_processes[i] = total_rows / mpi_size;
-    }
+    rows_per_processes[mpi_size - 1] += total_rows % mpi_size;
 
     // Calculate row offsets based on rows_per_processes
-    int offset = 0;
     row_offsets[0] = 0;
-    #pragma omp parallel for
     for (int i = 1; i < mpi_size; i++)
     {
-        row_offsets[i] = offset + rows_per_processes[i-1];
-        offset += rows_per_processes[i];
+        row_offsets[i] = row_offsets[i-1] + rows_per_processes[i-1];
     }
 
     // Compute b*b and reduce it across all processes
@@ -180,7 +178,7 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
 
         axpbyP(alpha, p_local, 1.0, x, local_size);
         axpbyP(-alpha, Ap_local, 1.0, r, local_size);
-
+        
         // Compute the new residual norm and reduce the result
         *tmp2 = dotP(r, r, local_size);
 
@@ -220,8 +218,8 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
     delete[] r; 
     delete[] p; 
     delete[] Ap; 
-    delete[] tmp1; 
-    delete[] tmp2;
+    delete tmp1; 
+    delete tmp2;
     delete[] Ap_local; 
     delete[] p_local; 
 }
@@ -229,8 +227,9 @@ void conjugate_gradients(const double * A, const double * b, double * x, size_t 
 int main(int argc, char ** argv)
 {   
     // MPI 
-    int rank, mpi_size;
-    MPI_Init(nullptr, nullptr);
+    int rank, mpi_size, thread_level;
+    MPI_Init_thread(nullptr, nullptr, MPI_THREAD_FUNNELED, &thread_level);
+    //printf("LEVEL: %d", thread_level);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank); 
     MPI_Comm_size(MPI_COMM_WORLD, &mpi_size); 
 
@@ -311,6 +310,7 @@ int main(int argc, char ** argv)
 
     if(rank == 0)
         printf("Finished successfully. Time taken to solve the sistem of size %d: %f seconds", matrix_cols, elapsed_time);
+    
     
     delete[] matrix; 
     delete[] rhs; 
