@@ -19,7 +19,7 @@ module load foss
 
 ### 3. Compile the program
 ```sh
-mpic++ -O2 src/conjugate_gradients.cpp -o conjugate_gradients
+mpic++ -O2 src/conjugate_gradients.cpp -o conjugate_gradients -fopenmp
 ```
 
 ### 4. Batch Script
