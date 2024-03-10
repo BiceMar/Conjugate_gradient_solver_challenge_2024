@@ -27,15 +27,16 @@ Create a shell script (mpi_job.sh) for your SLURM job. Use the following templat
 ```sh
 
 #!/bin/bash -l
-#SBATCH --nodes=1                          # Number of nodes
+#SBATCH --nodes=10                          # Number of nodes
 #SBATCH --ntasks=10                        # Number of tasks
 #SBATCH --qos=default                      # SLURM Quality of Service
-#SBATCH --cpus-per-task=16                 # Number of cores per task
+#SBATCH --cpus-per-task=64                 # Number of cores per task
 #SBATCH --time=00:15:00                    # Time limit (HH:MM:SS)
 #SBATCH --partition=cpu                    # Partition name
 #SBATCH --account=                         # Project account
 
 export OMP_NUM_THREADS=$SLURM_CPUS_PER_TASK
+export OMP_PROC_BIND=true
 
 srun --mpi=pspmix --cpus-per-task=$SLURM_CPUS_PER_TASK ./conjugate_gradients
 
